@@ -1,0 +1,1004 @@
+---
+title: "Cell means models_root fraction_14 SEP 2019"
+output:
+  word_document: default
+  pdf_document:
+    fig_height: 6
+    fig_width: 8
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(stringr)
+library(tidyr)
+
+library(rjags)
+load.module("glm")
+
+# Set random number generator seed for reproducible results
+set.seed(42)
+
+
+# Default theme for graphs
+theme_set( theme_bw() )
+
+
+# Function to calculate highest posterior density intervals
+# (adapted from coda::HPDinterval). Returns a matrix with a 
+# row for each input variable.
+hpdi <- function (x, prob = 0.95) 
+{
+  x <- as.matrix(x)
+  Nr <- nrow(x)
+  if (Nr <= 1) stop("x must have more than 1 vector element or matrix row")
+  x <- apply(x, 2, sort)
+
+  Nc <- ncol(x)
+  gap <- max(1, min(Nr - 1, round(Nr * prob)))
+  init <- 1:(Nr - gap)
+  
+  inds <- apply(x[init + gap, , drop = FALSE] - x[init, , drop = FALSE], 
+                MARGIN = 2, 
+                which.min)
+  
+  out <- cbind(x[cbind(inds, 1:Nc)], x[cbind(inds + gap, 1:Nc)])
+  colnames(out) <- c("lower", "upper")
+  
+  rnms <- colnames(x)
+  if (is.null(rnms)) rnms <- paste0("X", 1:Nc)
+  rownames(out) <- rnms
+  
+  out
+}
+
+
+REFIT_MODEL <- FALSE
+
+```
+
+
+## Data
+
+```{r}
+
+suppressWarnings(
+  DAT <- read_excel("AG_BIOMASS_FINAL_OCT.xlsx") %>%
+    mutate_if(is.character, as.factor) %>%
+    rename(watering = drought)
+)
+
+colnames(DAT) <- tolower(colnames(DAT)) %>%
+  str_replace("_", "")
+
+
+DAT <- DAT %>%
+  mutate(live = tolower(livedead) == "l") %>%
+  
+  select(plantid, live, co2, watering, veg, species, ratio) %>%
+  
+  filter(!is.na(ratio)) %>%
+
+  # Add cell indices to use with model
+  mutate(cell = group_indices(., veg, watering, co2)) %>%
+  
+  # Add some treatment labels
+  mutate(wtr.label = ifelse(watering == "drought", "dr", "wtr"),
+         co2.label = str_extract(co2, "\\d+"),
+         trt = paste(wtr.label, co2.label, sep = "_") ) %>%
+  
+  select(-wtr.label, -co2.label)
+
+
+# Lookup table to use with graphs
+Cell.lookup <- DAT %>%
+  distinct(cell, trt, veg) %>%
+  arrange(cell)
+
+```
+
+### Data summary
+
+```{r}
+
+cell.stats <- DAT %>% 
+  group_by(cell, trt, veg) %>% 
+  summarize(nobs = n(),
+            ndead = sum(!live),
+            median = median(ratio),
+            lowerquartile = quantile(ratio, 0.25),
+            upperquartile = quantile(ratio, 0.75)) %>%
+  ungroup()
+
+knitr::kable(cell.stats, digits = 2)
+
+```
+
+
+```{r}
+
+ggplot(data = DAT, aes(x = cell)) + 
+  geom_jitter(aes(y = ratio, colour = live),
+              width = 0.2, height = 0, shape = 1) +
+  
+  scale_x_continuous(breaks = 1:12, labels = Cell.lookup$trt) +
+  
+  labs(x = "", y = "Ratio value") +
+  
+  theme(axis.text.x = element_text(angle = 60, vjust = 0.5)) +
+  facet_grid(~veg)
+
+```
+
+
+
+## Model 3
+
+This is a further variation in which we allow dispersion to vary at the individual observation level. The idea is that outlier points in a treatment group will be given higher individual dispersion values than those in the main cluster of group data, thus down-weighting their contribution to the fitted mean for the group. We implement this idea by fitting a group dispersion parameter, as in the previous models, but then using this as the mean for individual observation dispersions.
+
+### Model code
+
+```{r}
+
+ratiomodel6.code <- "model {
+  for(i in 1:length(y)) {
+    y[i] ~ dbeta(alpha[i], beta[i])
+    alpha[i] <- phi.obs[i] * mu[cell[i]]
+    beta[i] <- phi.obs[i] * (1 - mu[cell[i]])
+
+    log(phi.obs[i]) <- p0[i]
+    p0[i] ~ dnorm(p0cell[cell[i]], 1)
+  }
+    
+
+  for (i in 1:max(cell)) {
+    logit(mu[i]) <- a0[i]
+    a0[i] ~ dt(0, tau.a0[i], shape.a0[i])
+    
+    tau.a0[i] <- pow(sd.a0[i], -2)
+    sd.a0[i] ~ dexp(0.1)
+    shape.a0[i] ~ dunif(1, 10)
+    
+    log(phi[i]) <- p0cell[i]
+    p0cell[i] ~ dnorm(0, tau.p0cell[i])
+
+    tau.p0cell[i] <- pow(sd.p0cell[i], -2)
+    sd.p0cell[i] ~ dexp(0.1)
+  }
+}"
+
+```
+
+
+### Compile and run the model 
+
+As before, we run the model with three chains so that we can check for model convergence.
+
+```{r}
+
+path <- "ratiomodel6.RData"
+
+if (!file.exists(path) || REFIT_MODEL) {
+  zz <- textConnection(ratiomodel6.code)
+
+  ratiomodel6 <- jags.model(zz,
+                            data = list(
+                              y = DAT$ratio,
+                              cell = DAT$cell
+                            ),
+                            n.chains = 4)
+  
+  close(zz)
+  
+  update(ratiomodel6, 1000)
+  
+  ratiomodel6.mcmc <- coda.samples(
+    ratiomodel5,
+    variable.names = c("mu", "phi"),
+    n.iter = 10000,
+    thin = 5)
+  
+  save(ratiomodel6.mcmc, file = path)
+
+} else {
+  load(path)
+}
+
+```
+
+
+### Model checking
+
+Check for convergence of the three MCMC chains.
+
+```{r}
+
+gelman.diag(ratiomodel6.mcmc)
+
+```
+
+The chains have converged.
+
+
+```{r}
+
+cat("Effective number of samples:\n")
+effectiveSize(ratiomodel6.mcmc)
+
+```
+
+```{r}
+
+x <- summary(ratiomodel6.mcmc)
+print(x$quantiles)
+
+```
+
+
+Combine the chains into a plain matrix of posterior samples.
+
+```{r}
+
+ratiomodel6.samples <- do.call(rbind, ratiomodel6.mcmc)
+
+# Helper function to get column indices for params
+fn_cols3 <- function(pattern) {
+  which(str_detect(colnames(ratiomodel6.samples), pattern))
+}
+
+```
+
+### Compare fitted Beta means to observations
+
+```{r}
+
+ii <- fn_cols3("^mu")
+dat <- ratiomodel6.samples[, ii]
+
+mid <- apply(dat, 2, median)
+q50 <- hpdi(dat, c(0.5))
+q95 <- hpdi(dat, c(0.95))
+
+dat.stats <- bind_cols(
+  data.frame(cell = 1:12, mid),
+  as.data.frame(q50) %>% rename(lwr50 = lower, upr50 = upper),
+  as.data.frame(q95) %>% rename(lwr95 = lower, upr95 = upper)
+) %>%
+  
+  left_join(Cell.lookup, by = "cell")
+
+
+ggplot(data = DAT, aes(x = trt)) +
+  geom_jitter(aes(y = ratio),
+              width = 0.1, height = 0, shape = 1, colour = "grey60") +
+  
+  geom_pointrange(data = dat.stats,
+                  aes(y = mid, ymin = lwr95, ymax = upr95),
+                  colour = "red") +
+  
+  coord_flip() +
+  
+  facet_grid(~veg)
+
+```
+
+
+### Compare observed and predicted densities
+
+```{r fig.width=8, fig.height=10}
+
+Ncurves <- 100
+ii <- sample(1:nrow(ratiomodel6.samples), size = Ncurves)
+
+mus <- ratiomodel6.samples[ii, fn_cols3("^mu\\[")]
+phis <- ratiomodel6.samples[ii, fn_cols3("^phi\\[")]
+
+# Note: this is just element-wise multiplication, not matrix algebra
+alphas <- phis * mus
+colnames(alphas) <- 1:ncol(alphas)
+
+betas <- phis * (1 - mus)
+colnames(betas) <- 1:ncol(betas)
+
+
+dat.gg <- bind_rows(
+  as.data.frame(alphas) %>% mutate(param = "alpha", iter = row_number()),
+  as.data.frame(betas) %>% mutate(param = "beta", iter = row_number())
+) %>%
+  
+  tidyr::gather(cell, value, -c(iter, param), convert = TRUE) %>%
+  tidyr::spread(param, value) %>%
+  
+  left_join(Cell.lookup, by = "cell") %>%
+  
+  group_by(trt, veg, iter) %>%
+  do({
+    x <- seq(0, 1, length.out = 50)
+    d <- dbeta(x, .$alpha, .$beta)
+    data.frame(ratio = x, density = d)
+  })
+
+
+ggplot(data = dat.gg) +
+  geom_line(aes(x = ratio, y = density, group = iter),
+            colour = "#0000ff11") +
+  
+  stat_density(data = DAT, aes(x = ratio), geom = "line", size = 1) +
+  
+  facet_wrap(trt ~ veg, ncol = 3)
+
+```
+
+
+### Table of treatment group means and bounds
+
+```{r}
+
+ratiomodel6.stats <- dat.stats %>%
+  select(trt, lwr95, lwr50, mid, upr50, upr95)
+
+
+write.csv(ratiomodel6.stats, file = "ratiomodel_fitted_means.csv", row.names = FALSE)
+
+
+knitr::kable( ratiomodel6.stats, digits = 2 )
+
+```
+
+
+
+There is much better agreement between the observed and modelled distributions for all cells than with first model.
+
+
+## Does species matter?
+
+Three species are nested within each of the veg types. To check for differences in total biomass between species within veg x treatments we can examine model residuals. If systematic differences are apparent it might be worth adding species random effects to the model.
+
+One way of calculating residuals for the model is to take the means of the posterior parameters (ie. means of the fitted cell means) and subtract these from the observed data.
+
+```{r}
+
+ratiomodel6.means<- colMeans(ratiomodel6.samples)[1:12]
+
+dat <- DAT %>%
+  mutate(resid = ratio - ratiomodel6.means[ cell ])
+
+```
+
+Next we will create a new species index with values 1-3 indicating species within veg, and then graph residuals against this index within each treatment.
+
+```{r}
+ 
+dat.gg <- dat %>%
+  group_by(veg) %>%
+  # there's probably an easier way to do this
+  mutate(ispecies = factor(as.integer(factor(species)))) %>%
+  ungroup()
+
+ggplot(data = dat.gg) +
+  geom_jitter(aes(x = ispecies, y = resid),
+              width = 0.15, height = 0) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  
+  facet_grid(veg ~ trt)
+
+```
+
+There seem to be systematic differences between species in the well-watered treatments, particularly for WSF, while differences are less obvious in the drought treatments.
+
+It might be worth adding some form of species random effects to the model but for the moment we will stick with the current model and look further at the posterior distribution, including how to appease frequentist reviewers addicted to significance tests.
+
+
+## Estimating differences and classifying effects by significance
+
+### Is there an overall effect of CO2 enhancement on mean total biomass?
+
+To examine this question we can compare the fitted means for the two levels of CO2 within each combination of veg type and watering. 
+
+First we join the table of cell numbers and treatment factors (using the `cell.stats` data frame cooked up earlier) to the MCMC samples for mean biomass. We arrange the resulting matrix so that MCMC iterations are columns in each of the 12 rows for cells.
+
+```{r}
+
+# Columns for fitted means in MCMC samples matrix
+ii <- str_detect(colnames(ratiomodel6.samples), "^mu")
+mcmc.mu <- ratiomodel6.samples[, ii]
+
+dat <- cbind(cell.stats[, 1:4], t(mcmc.mu))
+
+```
+
+Now we use some dplyr and tidyr functions to put the matrix into a form suitable for the question about CO2 effects. Where there are a large number of MCMC samples this will take a minute or two - but we can reuse the object for subsequent questions.
+
+```{r}
+
+dat <- dat %>%
+  tidyr::gather(iter, value, -c(cell, trt, veg))
+
+head(dat)
+
+```
+
+Now for each veg type we re-shape the data to have separate columns for predicted mean total biomass under the four combinations of watering and CO2. 
+
+The `unite` function (package tidyr) pastes together the levels of the watering and CO2 factors to create a new interaction factor.
+
+```{r}
+
+dat.watering.co2.effect <- dat %>%
+  # discard cell number so that it is not considered
+  # by the spread function
+  select(-cell) %>%
+  
+  tidyr::spread(trt, value)
+
+# Change colnames with 'well-watered' to 'well_watered' because R
+# has problems with hyphens in names
+colnames(dat.watering.co2.effect) <- 
+  colnames(dat.watering.co2.effect) %>%
+  str_replace_all("\\_", "_")
+
+
+```
+
+The resulting data frame now has four columns for mean total biomass, one for each combination of watering and CO2; with rows for MCMC samples within each veg type.
+
+```{r}
+
+head(dat.watering.co2.effect)
+
+```
+##means
+```{r}
+
+dat.watering.co2.effect %>%
+  group_by(veg) %>%
+  summarize(mean(wtr_400), mean(dr_400), mean(wtr_640), mean(dr_640))
+```
+
+
+
+## Calculations for biomass and differences
+
+```{r}
+## Calculate predicted biomass
+
+dat.watering.co2.diffs1 <- dat.watering.co2.effect %>%
+  mutate(diff1_drought_400ppm = dr_400,
+         diff1_drought_640ppm = dr_640,
+         diff1_well_watered_400ppm = wtr_400,
+         diff1_well_watered_640ppm = wtr_640) %>%
+  
+  select(veg, starts_with("diff1"))
+
+head(dat.watering.co2.diffs1)
+
+```
+
+```{r}
+## Calculate predicted difference
+
+dat.watering.co2.diffs2 <- dat.watering.co2.effect %>%
+  
+  mutate(drought.diff = (dr_640 - dr_400),
+         water.diff = (wtr_640 - wtr_400),
+         diff2_overall.diff = drought.diff - water.diff) %>%
+  
+  select(veg, starts_with("diff2"))
+
+head(dat.watering.co2.diffs2)
+```
+
+
+
+create interaction factor for raw data to be used in plotting
+
+```{r}
+DAT.plot <- DAT %>%
+  tidyr::unite(wateringco2, c("watering", "co2")) %>%
+    mutate(var = factor(trt, 
+                              levels = c("dr_400",         "dr_640",         "wtr_400",      "wtr_640"),
+                              labels = c("drought_400ppm", "drought_640ppm", "well_watered_400ppm", "well_watered_640ppm")))
+```
+
+
+Here we create seperate plots for each forest type for predicted biomass and raw data
+
+```{r fig.height = 4.2, fig.width = 1.5}
+
+## colors for labels
+
+cols <- c("drought_400ppm" = "#d95f02", "drought_640ppm" = "#1b9e77", "well_watered_400ppm" = "#7570b3", "well_watered_640ppm" = "#e7298a")
+
+## function to remove leading zeros from plot axis
+
+dropLeadingZero <- function(l){
+  lnew <- c()
+  for(i in l){
+    if(i==0){
+      lnew <- c(lnew, "0")
+    } else if (i>1){
+      lnew <- c(lnew, as.character(i))
+    } else
+      lnew <- c(lnew, gsub("(?<![0-9])0+", "", i, perl = TRUE))
+    }
+    as.character(lnew)
+    }
+
+## Plot theme
+
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold", hjust = 0.5, vjust = 1),
+  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  axis.text.x = element_text(size = 10, face = "bold", angle = 290, hjust = 0.2, vjust=0.6, margin = unit(c(0.2, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 12, face = "bold"),
+  strip.text.x = element_text(size = 12),
+  strip.text.y = element_text(size = 12),
+  strip.text = element_text(face = "bold"),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  plot.margin = unit(c(5.5, 2, 1, 2), "pt"))
+
+## plot labels
+
+xtext <- c(expression(aCO[2] ~ "+ D"), expression(eCO[2] ~ "+ D"), expression(aCO[2] ~ "+ W"), expression(eCO[2] ~ "+ W"))
+
+# convert to long format for ggplot
+dat.gg <- dat.watering.co2.diffs1 %>%
+  tidyr::gather(var, diff1, -veg) %>%
+  mutate(var = factor(str_replace(var, "diff1_", "")))
+
+## create HPDI intervals
+x.stats <- dat.gg %>%
+  group_by(veg, var) %>%
+ 
+    summarize(lwr95 = hpdi(diff1, 0.95)[, "lower"],
+            lwr50 = hpdi(diff1, 0.5)[, "lower"],
+            mid = median(diff1),
+            upr50 = hpdi(diff1, 0.5)[, "upper"],
+            upr95 = hpdi(diff1, 0.95)[, "upper"])
+
+## DSF plot 1
+
+## Subset raw data for DSF plot
+DAT.plot.DSF <- DAT.plot %>%
+  filter(veg == "DSF")
+
+DSF.1.rs <- ggplot(subset(x.stats, veg %in% c("DSF")), aes(x = var))+
+ 
+   My_Theme +
+
+    geom_jitter(data = DAT.plot.DSF, aes(y = ratio, color = var), 
+            height = 0.2,
+            size = 0.6, alpha = 0.3, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr95, yend = upr95),
+               size = 0.6) +
+ 
+  geom_segment(aes(xend = var, y = lwr50, yend = upr50),
+               size = 6.0, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr50+0.002, yend = upr50-0.002, color = var),
+               size = 4.75, show.legend = FALSE) +
+  
+    scale_color_manual(values = cols) +
+ 
+  theme(axis.text.y = element_blank(), axis.text.x = element_text(size = 9, hjust=0), axis.title.y = element_text(size = 12), axis.title.x = element_text(size = 12)) +
+  
+  labs(x = NULL, y = NULL) +
+  
+  scale_x_discrete(labels=xtext) +
+  
+  annotate("text", x = 0.8, y = 0.2375, label = "e", size = 4, fontface = 2) +
+  
+  scale_y_continuous(breaks = c(0.05, 0.1, 0.15, 0.2, 0.25), labels = dropLeadingZero) +
+  coord_cartesian(ylim=c(0.05, 0.25))  
+ 
+ 
+
+
+## GWD plot 1
+
+## Subset raw data for DSF plot
+DAT.plot.GWD <- DAT.plot %>%
+  filter(veg == "GWD")
+
+GWD.1.rs <- ggplot(subset(x.stats, veg %in% c("GWD")), aes(x = var))+
+ 
+  My_Theme +
+
+  
+    geom_jitter(data = DAT.plot.GWD, aes(y = ratio, color = var), 
+            height = 0.2,
+            size = 0.6, alpha = 0.3, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr95, yend = upr95),
+               size = 0.6) +
+ 
+  geom_segment(aes(xend = var, y = lwr50, yend = upr50),
+               size = 6.0, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr50+0.002, yend = upr50-0.002, color = var),
+               size = 4.75, show.legend = FALSE) +
+  
+    scale_color_manual(values = cols) +
+ 
+  theme(axis.text.y = element_blank(), axis.text.x = element_text(size = 9, hjust=0), axis.title.y = element_text(size = 12), axis.title.x = element_text(size = 12)) +
+  
+  labs(x = NULL, y = NULL) +
+  
+  scale_x_discrete(labels=xtext) +
+  
+  annotate("text", x = 0.8, y = 0.2375, label = "f", size = 4, fontface = 2) +
+  
+  scale_y_continuous(breaks = c(0.05, 0.1, 0.15, 0.2, 0.25), labels = dropLeadingZero) +
+  coord_cartesian(ylim=c(0.05, 0.25)) 
+
+
+### WSF plot 1
+
+## Subset raw data for WSF plot
+DAT.plot.WSF <- DAT.plot %>%
+  filter(veg == "WSF")
+
+WSF.1.rs <- ggplot(subset(x.stats, veg %in% c("WSF")), aes(x = var))+
+ 
+  My_Theme +
+
+  
+    geom_jitter(data = DAT.plot.WSF, aes(y = ratio, color = var), 
+            height = 0.2,
+            size = 0.6, alpha = 0.3, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr95, yend = upr95),
+               size = 0.6) +
+ 
+  geom_segment(aes(xend = var, y = lwr50, yend = upr50),
+               size = 6.0, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr50+0.002, yend = upr50-0.002, color = var),
+               size = 4.75, show.legend = FALSE) +
+  
+    scale_color_manual(values = cols) +
+ 
+  theme(axis.text.x = element_text(size = 9, hjust=0), axis.title.y = element_text(size = 12), axis.title.x = element_text(size = 12)) +
+  
+  labs(x = "", y = "RMR\n") +
+  
+  scale_x_discrete(labels=xtext) +
+  
+  annotate("text", x = 0.8, y = 0.2375, label = "d", size = 4, fontface = 2) +
+  
+  
+  scale_y_continuous(breaks = c(0.05, 0.1, 0.15, 0.2, 0.25), labels = dropLeadingZero) +
+  coord_cartesian(ylim=c(0.05, 0.25)) 
+
+
+
+# test plot  
+WSF.1.rs
+
+```
+
+```{r}
+### how many points are above the plot window?
+points <- DAT.plot.DSF %>%
+  filter(ratio >= 0.25) %>%
+  group_by(var) %>%
+  count(var)
+
+knitr::kable(points, digits = 3)
+```
+
+```{r}
+### how many points are above the plot window?
+points <- DAT.plot.GWD %>%
+  filter(ratio >= 0.25) %>%
+  group_by(var) %>%
+  count(var)
+
+knitr::kable(points, digits = 3)
+```
+
+```{r}
+### how many points are above the plot window?
+points <- DAT.plot.WSF %>%
+  filter(ratio >= 0.25) %>%
+  group_by(var) %>%
+  count(var)
+
+knitr::kable(points, digits = 3)
+```
+
+Mean increase in total biomass:
+
+```{r}
+
+dat.gg %>%
+  group_by(veg, var) %>%
+  summarize(prob = mean(diff1))
+
+```
+
+Summary of magnitude of differences based on 50% and 95% highest posterior density intervals.
+
+The `hpdi` function is defined in the setup code chunk at the beginning of this document.
+
+```{r}
+
+x <- dat.gg %>%
+  group_by(veg, var) %>%
+  
+  summarize(lwr95 = hpdi(diff1, 0.95)[, "lower"],
+            lwr50 = hpdi(diff1, 0.5)[, "lower"],
+            mid = median(diff1),
+            upr50 = hpdi(diff1, 0.5)[, "upper"],
+            upr95 = hpdi(diff1, 0.95)[, "upper"])
+
+knitr::kable(x, digits = 2)
+
+```
+
+
+Here we create seperate plots for each forest type in the difference calculation
+
+```{r fig.height = 4, fig.width = 1.3}
+
+## colors for labels
+
+#rhg_cols2 <- c("grey45", "grey15")
+
+## plot theme
+
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.x = element_text(size = 12, face = "bold"),
+  axis.title.y = element_text(size = 12, face = "bold", hjust = 0.5),
+  panel.background = element_blank(),
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  plot.margin = unit(c(5.5, 2, 1, 5.5), "pt"),
+  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  axis.text.x = element_blank())
+
+
+## labels for plots
+
+xtext <- c(expression(aCO[2]), expression(eCO[2]))
+#xtext <- c("D", "W")
+
+
+# convert to long format for ggplot
+dat.gg <- dat.watering.co2.diffs2 %>%
+  tidyr::gather(var, diff2, -veg) %>%
+  mutate(var = factor(str_replace(var, "diff2_", "")))
+
+
+## create HPDI intervals  
+x.stats <- dat.gg %>%
+  group_by(veg, var) %>%
+ 
+    summarize(lwr95 = hpdi(diff2, 0.95)[, "lower"],
+            lwr50 = hpdi(diff2, 0.5)[, "lower"],
+            mid = median(diff2),
+            upr50 = hpdi(diff2, 0.5)[, "upper"],
+            upr95 = hpdi(diff2, 0.95)[, "upper"]) 
+
+
+### DSF plot 2
+
+DSF.2.rs <- ggplot(subset(x.stats, veg %in% c("DSF")), aes(x = var)) +
+  
+  My_Theme +
+
+  geom_linerange(aes(ymin = lwr95, ymax = upr95),
+               size = 0.5, position = position_dodge(width = 0.6)) +
+ 
+  geom_linerange(aes(ymin = lwr50, ymax = upr50, colour = var),
+               size = 5.0, show.legend = FALSE, position = position_dodge(width = 0.6), col = "limegreen") +
+ 
+  #scale_colour_manual(values = rhg_cols2) +
+ 
+ 
+  theme(axis.text.y = element_blank()) +
+  
+  labs(x = NULL, y = NULL) +
+
+  
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  
+  scale_x_discrete(labels = xtext) +
+  
+      annotate("text", x = 0.6, y = 0.03, label = "e", size = 4, fontface = 2) +
+  
+  annotate("text", x = 1.3, y = -0.07, label = "-0.01 %", size = 3, fontface = 2) +
+  
+    scale_y_continuous(labels = scales::percent_format(accuracy = 2, suffix = ""), breaks = c(-0.08, -0.06, -0.04, -0.02, 0, 0.02, 0.04), position = "left") +
+  coord_cartesian(ylim=c(-0.08, 0.04)) 
+
+### GWD plot 2
+
+GWD.2.rs <- ggplot(subset(x.stats, veg %in% c("GWD")), aes(x = var)) +
+  
+  My_Theme +
+
+  geom_linerange(aes(ymin = lwr95, ymax = upr95),
+               size = 0.5, position = position_dodge(width = 0.6)) +
+ 
+  geom_linerange(aes(ymin = lwr50, ymax = upr50, colour = var),
+               size = 5.0, show.legend = FALSE, position = position_dodge(width = 0.6), col = "sienna1") +
+ 
+  #scale_colour_manual(values = rhg_cols2) +
+ 
+ 
+  theme(axis.text.y = element_blank()) +
+  
+  labs(x = NULL, y = NULL) +
+  
+  scale_x_discrete(labels = xtext) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  
+      annotate("text", x = 0.6, y = 0.03, label = "f", size = 4, fontface = 2) +
+  
+  annotate("text", x = 1.3, y = -0.07, label = "-3.58 %", size = 3, fontface = 2) +
+  
+    scale_y_continuous(labels = scales::percent_format(accuracy = 2, suffix = ""), breaks = c(-0.08, -0.06, -0.04, -0.02, 0, 0.02, 0.04), position = "left") +
+  coord_cartesian(ylim=c(-0.08, 0.04))  
+
+
+
+### WSF plot 2
+  
+WSF.2.rs <- ggplot(subset(x.stats, veg %in% c("WSF")), aes(x = var)) +
+  
+  My_Theme +
+
+  geom_linerange(aes(ymin = lwr95, ymax = upr95),
+               size = 0.5, position = position_dodge(width = 0.6)) +
+ 
+  geom_linerange(aes(ymin = lwr50, ymax = upr50, colour = var),
+               size = 5.0, show.legend = FALSE, position = position_dodge(width = 0.6), col = "royalblue1") +
+ 
+  #scale_colour_manual(values = rhg_cols2) +
+  
+  labs(x = "", y = "\u0394 RMR (%)\n") +
+
+  theme(axis.text.y = element_text(size = 10), axis.title.y = element_text(size = 12, vjust = 3)) +
+  
+  scale_x_discrete(labels = xtext) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  
+      annotate("text", x = 0.6, y = 0.03, label = "d", size = 4, fontface = 2) +
+  
+     annotate("text", x = 1.3, y = -0.07, label = "-1.77 %", size = 3, fontface = 2) +
+  
+  
+    scale_y_continuous(labels = scales::percent_format(accuracy = 2, suffix = ""), breaks = c(-0.08, -0.06, -0.04, -0.02, 0, 0.02, 0.04), position = "left") +
+  coord_cartesian(ylim=c(-0.08, 0.04)) 
+
+#test plot
+WSF.2.rs
+```
+
+Probability of an increase in total biomass relative to the reference level:
+
+```{r}
+
+dat.gg %>%
+  group_by(veg, var) %>%
+  summarize(prob = mean(diff2))
+
+```
+
+Summary of magnitude of differences based on 50% and 95% highest posterior density intervals.
+
+The `hpdi` function is defined in the setup code chunk at the beginning of this document.
+
+```{r}
+
+x <- dat.gg %>%
+  group_by(veg, var) %>%
+  
+  summarize(lwr95 = hpdi(diff2, 0.95)[, "lower"],
+            lwr50 = hpdi(diff2, 0.5)[, "lower"],
+            mid = median(diff2),
+            upr50 = hpdi(diff2, 0.5)[, "upper"],
+            upr95 = hpdi(diff2, 0.95)[, "upper"])
+
+knitr::kable(x, digits = 2)
+
+```
+
+### combine plots
+
+
+```{r fig.height = 2.6, fig.width = 6}
+library(ggpubr)
+library(egg)
+
+
+
+fig <- egg::ggarrange(WSF.1.rs, DSF.1.rs, GWD.1.rs, ncol = 3, nrow = 1, widths = c(1, 1, 1)) 
+
+annotate_figure(fig, bottom = text_grob("Treatment", face = "bold", vjust = -2))
+
+```
+
+```{r fig.height = 2, fig.width = 3}
+library(ggpubr)
+library(egg)
+
+
+
+fig <- egg::ggarrange(WSF.2.rs, DSF.2.rs, GWD.2.rs, ncol = 3, nrow = 1, widths = c(1, 1, 1)) 
+
+annotate_figure(fig, bottom = text_grob("Treatment", face = "bold", vjust = -2))
+
+fig 
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Probability of an increase in total biomass relative to the reference level:
+
+```{r}
+
+dat.gg %>%
+  group_by(veg, var) %>%
+  summarize(prob = mean(diff2))
+
+```
+
+Summary of magnitude of differences based on 50% and 95% highest posterior density intervals.
+
+The `hpdi` function is defined in the setup code chunk at the beginning of this document.
+
+```{r}
+
+x <- dat.gg %>%
+  group_by(veg, var) %>%
+  
+  summarize(lwr95 = hpdi(diff2, 0.95)[, "lower"],
+            lwr50 = hpdi(diff2, 0.5)[, "lower"],
+            mid = median(diff2),
+            upr50 = hpdi(diff2, 0.5)[, "upper"],
+            upr95 = hpdi(diff2, 0.95)[, "upper"])
+
+knitr::kable(x, digits = 2)
+
+```

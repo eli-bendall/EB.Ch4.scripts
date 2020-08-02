@@ -1,0 +1,1094 @@
+---
+title: "Cell means models_coarse root biomass_14 SEP 2019"
+output:
+  word_document: default
+  pdf_document:
+    fig_height: 6
+    fig_width: 8
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(purrr)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(stringr)
+library(tidyr)
+
+library(rjags)
+load.module("glm")
+
+
+# Detect if we are running code chunks manually or knitting to an output document
+# so we can format graphs differently
+x <- knitr::current_input()
+KNITTING_DOC <- !(x == "" || is.null(x))
+
+# Set random number generator seed for reproducible results
+set.seed(42)
+
+
+# Default theme for graphs
+theme_set( theme_bw() )
+
+
+# Function to calculate highest posterior density intervals
+# (adapted from coda::HPDinterval). Returns a matrix with a 
+# row for each input variable.
+hpdi <- function (x, prob = 0.95) 
+{
+  x <- as.matrix(x)
+  Nr <- nrow(x)
+  if (Nr <= 1) stop("x must have more than 1 vector element or matrix row")
+  x <- apply(x, 2, sort)
+
+  Nc <- ncol(x)
+  gap <- max(1, min(Nr - 1, round(Nr * prob)))
+  init <- 1:(Nr - gap)
+  
+  inds <- apply(x[init + gap, , drop = FALSE] - x[init, , drop = FALSE], 
+                MARGIN = 2, 
+                which.min)
+  
+  out <- cbind(x[cbind(inds, 1:Nc)], x[cbind(inds + gap, 1:Nc)])
+  colnames(out) <- c("lower", "upper")
+  
+  rnms <- colnames(x)
+  if (is.null(rnms)) rnms <- paste0("X", 1:Nc)
+  rownames(out) <- rnms
+  
+  out
+}
+
+```
+
+
+## Import data
+
+```{r}
+
+DAT <- read_excel("AG_BIOMASS_FINAL_OCT.xlsx") %>%
+  mutate_if(is.character, as.factor) %>%
+  rename(watering = drought) %>%
+  
+  # subset data to records without missing biomass values
+  filter(!is.na(root_biomass)) %>%
+  filter(root_biomass > 0)
+
+colnames(DAT) <- tolower(colnames(DAT))
+
+
+
+
+
+```
+
+
+
+
+
+## Modelling approach
+
+A cell means model is an alternative to the linear model form for ANOVA-style designs. The two approaches will yield equivalent results (allowing for computational differences) but depending on the nature of the questions being addressed by the model, one approach can be more convenient than the other for post-hoc interpretation and prediction.
+
+Given the experimental factors watering, CO2 and veg type, the linear model form of the complete model would be written in R's formula syntax (and making all terms explicit) as:
+
+```
+y ~ watering + co2 + veg +
+    watering:co2 + watering:veg + co2:veg +
+    watering:co2:veg
+    
+```
+
+An alternative form of the same model is to think of each the 12 possible combination of factors (2 watering levels x 2 CO2 levels x 3 veg types) as a *cell* and model the observations in terms of cell means and (optionally) cell variances. Essentially, this is just fitting a distribution to the response values of each cell. We no longer have a regression equation as we would with the linear model form, but we can examine any of the quantities represented by coefficients in the linear model by querying the resulting posterior distribution. Examples:
+
+  * Effect of main terms and their interactions in terms of summary statistics (e.g. mean or median), bounds (e.g. 95% central or highest density intervals).
+  
+  * Frequentist-style significance of terms (e.g. whether the 95% central interval for a term includes zero).
+  
+  * Differences between specific treatments.
+
+JAGS code for the cell means model can be easier to construct and understand than the equivalent linear model. We can also allow for different variances between cells and species random effects.
+
+
+## Cell means model for total biomass
+
+First we add a cell index column identifying the factor combinations:
+
+```{r}
+
+DAT <- DAT %>%
+  ungroup() %>%
+  mutate(cell = group_indices(., veg, watering, co2))
+
+```
+
+There are 12 groups (full model) with roughly equal numbers of observations. We compute some summary statistics for total biomass in each group to graph and for model checking later.
+
+```{r}
+
+cell.stats <- DAT %>% 
+  group_by(cell, veg, watering, co2) %>% 
+  summarize(nobs = n(),
+            mean = mean(root_biomass),
+            median = median(root_biomass),
+            stdev = sd(root_biomass),
+            q25 = quantile(root_biomass, 0.25),
+            q75 = quantile(root_biomass, 0.75)) %>%
+  ungroup()
+
+knitr::kable(cell.stats, digits = 2)
+
+```
+
+```{r}
+
+library(RColorBrewer)
+myColors <- brewer.pal(2,"Set1")
+names(myColors) <- levels(DAT$co2)
+colScale <- scale_colour_manual(name = "co2",values = myColors)
+
+My_Theme = theme(
+  axis.title.x = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.title.y = element_text(size = 16))
+
+
+
+
+ggplot(data = DAT, aes(x = veg)) +
+  
+  My_Theme +
+  
+  geom_point(aes(y = root_biomass, colour = co2),
+             position = position_jitterdodge(jitter.width = 0.4),
+             size = 2, alpha = 0.4) +
+  
+  geom_errorbar(data = cell.stats, 
+                aes(ymin = q25, ymax = q75, group = co2),
+                position = position_dodge(width = 0.8),
+                width = 0.4) +
+  
+  geom_point(data = cell.stats, 
+             aes(y = mean, group = co2),
+             position = position_dodge(width = 0.8)) +
+  
+  labs(x = "Forest type", y = "Biomass (g)",
+       title = "Coarse root biomass",
+       subtitle = "Black points and lines are means and inter-quartile range") +
+  
+  colScale +
+  
+  
+  facet_wrap(~ watering)
+
+```
+
+## First model - Gamma response with constant variance
+
+We start with an unrealistically simple model to develop the general approach and code, and to serve as a baseline for comparison with subsequent models.
+
+Values for total biomass can only be positive. One commonly used option for modelling such values is the Gamma distribution. In R and JAGS the Gamma distribution function has two parameters, shape (s) and rate (r).  The mean of the distribution $\mu = s/r$ while the variance $\sigma^2 = s/r^2$. To formulate the model in terms of the mean and variance directly we can re-arrange to give:
+
+$$ s = \frac{\mu^2}{\sigma^2}  \quad r = \frac{\mu}{\sigma^2}  $$
+
+## Second model - independent cell variances
+
+This model follows the same approach as the first to fit Gamma-distributed cell means, but allows the variance to differ between cells. It thus has 24 parameters compared to 13 parameters for the first model.
+
+
+### Model code
+
+The JAGS code is very similar to that for the first model except that now we have multiple `sd` parameters indexed by cell.
+
+```{r}
+
+model2Txt <- "model {
+  for (i in 1:length(total)) {
+    # Responses modelled as Gamma distributed values
+    total[i] ~ dgamma(shape[i], rate[i])
+    
+    # Relate parameters of Gamma distribution to
+    # cell means and variances
+    shape[i] <- mu[cell[i]]^2 / sd[cell[i]]^2
+    rate[i] <- mu[cell[i]] / sd[cell[i]]^2
+  }
+  
+  # Vague Normal priors for cell means constrained
+  # to positive values. 
+  # Uniform priors for standard deviation within
+  # watering treatment X veg type combinations.
+  for (k in 1:max(cell)) {
+    mu[k] ~ dnorm(0, 10)I(0, )
+    sd[k] ~ dunif(1, 5)
+  }
+}"
+
+```
+
+
+### Compile and run the model 
+
+As before, we run the model with three chains so that we can check for model convergence.
+
+```{r}
+
+zz <- textConnection(model2Txt)
+
+model2 <- jags.model(zz,
+                     data = list(
+                       total = DAT$root_biomass,
+                       cell = DAT$cell
+                     ),
+                     n.chains = 3,
+                     n.adapt = 1e3)
+
+close(zz)
+
+model2.sims <- coda.samples(model2,
+                            variable.names = c("mu", "sd"),
+                            n.iter = 1e4)
+
+```
+
+
+### Model checking
+
+Check for convergence of the three MCMC chains.
+
+```{r}
+
+gelman.diag(model2.sims)
+
+```
+
+The chains have converged.
+
+Next, we check the degree of auto-correlation in the MCMC samples.
+
+```{r}
+
+cat("Auto-correlation:\n")
+autocorr.diag(model2.sims)
+
+cat("\nEffective number of samples:\n")
+effectiveSize(model2.sims)
+
+```
+
+
+Auto-correlation is more pronounced than with the previous model, reducing the effective sample size for parameters. We can use the `raftery.diag` function to get an estimate of the minimally adequate sample size for each parameter in order to have a good estimate of the tails of the fitted distributions (see the function help page for details).
+
+```{r}
+
+model2.post <- as.mcmc( do.call(rbind, model2.sims) )
+
+x <- raftery.diag(model2.post)
+print(x)
+
+# Check if any parameters have too few samples
+xm <- x$resmatrix
+ii <- xm[, "N"] < xm[, "Nmin"]
+
+cat(sum(ii), "parameters with not enough samples")
+
+```
+
+
+### Model predictions
+
+We will skip examination of the fitted means for the moment and just look at how well the distribution of model predictions at the individual plant level agrees with the observed data for each cell.
+
+Generate predictions for a new observation from each MCMC sample:
+
+```{r}
+
+model2.post <- as.mcmc( do.call(rbind, model2.sims) )
+
+dat <- apply(model2.post, 1, function(samples) {
+  means <- samples[1:12]
+  sd <- samples[13:24]
+  
+  shape <- means^2 / sd^2
+  rate <- means / sd^2
+  rgamma(12, shape, rate)
+})
+
+dat <- t(dat)
+
+```
+
+Graphical comparison of observed and modelled distributions:
+
+```{r}
+
+# Convert to long format: cell number; predicted value
+dat.gg <- as.data.frame(dat) %>%
+  tidyr::gather(cell, value) %>%
+  mutate(cell = as.integer(str_extract(cell, "\\d+")),
+         var = "predicted") %>%
+  
+  # Add observed data
+  rbind( data.frame(cell = DAT$cell,
+                    value = DAT$root_biomass,
+                    var = "observed"))
+
+
+# Labelling function for facets.
+# Gives shorter labels when running code within R and longer
+# labels when knitting to Word, PDF etc.
+# Note - this function relies on the existence of a `cell.stats` summary
+# data frame (see earlier chunk)
+#
+labelfn <- function(cells) {
+  cells <- as.integer(cells)
+  
+  labels <- paste(cell.stats$veg[cells], 
+                  cell.stats$watering[cells], 
+                  cell.stats$co2[cells])
+  
+  if (!KNITTING_DOC) {
+    # Shorter facet labels, just for display within R
+    labels <- str_replace_all(labels, c("well-watered" = "w",
+                                        "drought" = "d",
+                                        "400ppm" = "",
+                                        "640ppm" = "+ CO2"))
+  }
+  
+  labels
+}
+
+
+
+ggplot(data = dat.gg) +
+  geom_density(aes(x = value, colour = var, fill = var), alpha = 0.4) +
+  facet_wrap(~ cell, labeller = as_labeller(labelfn), scales = "free")
+
+```
+
+There is much better agreement between the observed and modelled distributions for all cells than with first model.
+
+
+## Does species matter?
+
+Three species are nested within each of the veg types. To check for differences in total biomass between species within veg x treatments we can examine model residuals. If systematic differences are apparent it might be worth adding species random effects to the model.
+
+One way of calculating residuals for the model is to take the means of the posterior parameters (ie. means of the fitted cell means) and subtract these from the observed data.
+
+```{r}
+
+model2.postmeans <- colMeans(model2.post)[1:12]
+
+dat <- DAT %>%
+  mutate(resid = root_biomass - model2.postmeans[ cell ])
+
+```
+
+Next we will create a new species index with values 1-3 indicating species within veg, and then graph residuals against this index within each treatment.
+
+```{r}
+ 
+dat.gg <- dat %>%
+  group_by(veg) %>%
+  # there's probably an easier way to do this
+  mutate(ispecies = factor(as.integer(factor(species)))) %>%
+  ungroup()
+
+ggplot(data = dat.gg) +
+  geom_jitter(aes(x = ispecies, y = resid),
+              width = 0.15, height = 0) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  
+  facet_grid(veg ~ watering + co2)
+
+```
+
+There seem to be systematic differences between species in the well-watered treatments, particularly for WSF, while differences are less obvious in the drought treatments.
+
+It might be worth adding some form of species random effects to the model but for the moment we will stick with the current model and look further at the posterior distribution, including how to appease frequentist reviewers addicted to significance tests.
+
+
+## Estimating differences and classifying effects by significance
+
+### Is there an overall effect of CO2 enhancement on mean total biomass?
+
+To examine this question we can compare the fitted means for the two levels of CO2 within each combination of veg type and watering. 
+
+First we join the table of cell numbers and treatment factors (using the `cell.stats` data frame cooked up earlier) to the MCMC samples for mean biomass. We arrange the resulting matrix so that MCMC iterations are columns in each of the 12 rows for cells.
+
+```{r}
+
+# Columns for fitted means in MCMC samples matrix
+ii <- str_detect(colnames(model2.post), "^mu")
+mcmc.mu <- model2.post[, ii]
+
+dat <- cbind(cell.stats[, 1:4], t(mcmc.mu))
+
+```
+
+Now we use some dplyr and tidyr functions to put the matrix into a form suitable for the question about CO2 effects. Where there are a large number of MCMC samples this will take a minute or two - but we can reuse the object for subsequent questions.
+
+```{r}
+
+dat <- dat %>%
+  tidyr::gather(iter, value, -c(cell, veg, watering, co2))
+
+head(dat)
+
+```
+
+Now for each combination of veg and watering at each MCMC iteraction, we re-shape the data to have separate columns for predicted mean total biomass under 400ppm and 640ppm and calculate
+difference.
+
+```{r}
+
+dat.co2.effect <- dat %>%
+  # discard cell number so that it is not considered
+  # by the spread function
+  select(-cell) %>%
+  
+  tidyr::spread(co2, value) %>%
+  
+  mutate(effect = `640ppm` - `400ppm`)
+
+head(dat.co2.effect)
+
+```
+
+Distribution of difference in biomass due to CO2:
+
+```{r}
+
+ggplot(data = dat.co2.effect) +
+  geom_density(aes(x = effect)) +
+  geom_vline(xintercept = 0, linetype = "dashed")
+
+```
+
+What is the probability that CO2 enhancement leads to an increase in total biomass across all veg types?
+
+```{r}
+
+p <- mean(dat.co2.effect$effect > 0)
+cat("Probability of increased biomass: ", round(p * 100, 2), "%", sep = "")
+
+```
+
+We can group the data to ask the same question for each veg type:
+
+```{r}
+
+x <- dat.co2.effect %>%
+  group_by(veg) %>%
+  summarize(p.increase = mean(effect > 0))
+
+knitr::kable(x)
+
+```
+
+
+
+### Examining differences due to CO2 and watering treatment by veg type
+
+Here we are interested in the combined effects of two factors on total plant biomass. The general approach is the same as for the previous example looking at the overall effect of CO2. We compare the fitted means for combinations of CO2 and watering within each veg type.
+
+We begin with the `dat` data frame from the previous example which has MCMC samples from model2 for the fitted means and their related treatment factors.
+
+(If you've lost this you can re-create it by running the first two code chunks in the previous example)
+
+```{r}
+
+head(dat)
+
+```
+
+Now for each veg type we re-shape the data to have separate columns for predicted mean total biomass under the four combinations of watering and CO2. 
+
+The `unite` function (package tidyr) pastes together the levels of the watering and CO2 factors to create a new interaction factor.
+
+```{r}
+
+dat.watering.co2.effect <- dat %>%
+  # discard cell number so that it is not considered
+  # by the spread function
+  select(-cell) %>%
+  
+  tidyr::unite(watering_co2, watering, co2) %>%
+  
+  tidyr::spread(watering_co2 , value)
+
+# Change colnames with 'well-watered' to 'well_watered' because R
+# has problems with hyphens in names
+colnames(dat.watering.co2.effect) <- 
+  colnames(dat.watering.co2.effect) %>%
+  str_replace_all("\\-", "_")
+
+
+```
+
+The resulting data frame now has four columns for mean total biomass, one for each combination of watering and CO2; with rows for MCMC samples within each veg type.
+
+```{r}
+
+head(dat.watering.co2.effect)
+
+```
+##means
+```{r}
+dat.watering.co2.effect %>%
+  group_by(veg) %>%
+  summarize(mean(well_watered_400ppm), mean(drought_400ppm), mean(well_watered_640ppm), mean(drought_640ppm))
+```
+
+
+
+## Calculations for biomass and differences
+
+```{r}
+## Calculate predicted biomass
+
+dat.watering.co2.diffs1 <- dat.watering.co2.effect %>%
+  mutate(diff1_drought_400ppm = drought_400ppm,
+         diff1_drought_640ppm = drought_640ppm,
+         diff1_well_watered_400ppm = well_watered_400ppm,
+         diff1_well_watered_640ppm = well_watered_640ppm) %>%
+  
+  select(veg, starts_with("diff1"))
+
+head(dat.watering.co2.diffs1)
+
+```
+
+```{r}
+## Calculate predicted difference
+
+  
+dat.watering.co2.diffs2 <- dat.watering.co2.effect %>%
+  mutate(drought.diff = drought_640ppm - drought_400ppm,
+         water.diff = well_watered_640ppm - well_watered_400ppm,
+         diff2_overall.diff = drought.diff - water.diff) %>% 
+  
+  select(veg, starts_with("diff2"))
+
+
+dat.watering.co2.diffs3 <- dat.watering.co2.effect %>%
+  mutate(drought.diff = (drought_640ppm - drought_400ppm) / drought_400ppm * 100,
+         water.diff = (well_watered_640ppm - well_watered_400ppm) / well_watered_400ppm *100,
+         diff3_overall.diff = drought.diff - water.diff) %>% 
+  
+  select(veg, starts_with("diff3"))
+
+head(dat.watering.co2.diffs2)
+```
+
+
+create interaction factor for raw data to be used in plotting
+
+```{r}
+DAT.plot <- DAT %>%
+  tidyr::unite(wateringco2, c("watering", "co2")) %>%
+    mutate(var = factor(wateringco2, 
+                              levels = c("drought_400ppm", "drought_640ppm", "well-watered_400ppm", "well-watered_640ppm"),
+                              labels = c("drought_400ppm", "drought_640ppm", "well_watered_400ppm", "well_watered_640ppm")))
+```
+
+
+Here we create seperate plots for each forest type for predicted biomass and raw data
+
+```{r fig.height = 4.2, fig.width = 1.5}
+
+## colors for labels
+
+cols <- c("drought_400ppm" = "#d95f02", "drought_640ppm" = "#1b9e77", "well_watered_400ppm" = "#7570b3", "well_watered_640ppm" = "#e7298a")
+
+## Plot theme
+
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold", hjust = 0.5, vjust = 3.7),
+  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  axis.text.x = element_text(size = 10, face = "bold", angle = 290, hjust = 0.2, vjust=0.6, margin = unit(c(0.2, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 12, face = "bold"),
+  strip.text.x = element_text(size = 12),
+  strip.text.y = element_text(size = 12),
+  strip.text = element_text(face = "bold"),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  plot.margin = unit(c(5.5, 2, 1, 2), "pt"))
+
+## plot labels
+
+xtext <- c(expression(aCO[2] ~ "+ D"), expression(eCO[2] ~ "+ D"), expression(aCO[2] ~ "+ W"), expression(eCO[2] ~ "+ W"))
+
+# convert to long format for ggplot
+dat.gg <- dat.watering.co2.diffs1 %>%
+  tidyr::gather(var, diff1, -veg) %>%
+  mutate(var = factor(str_replace(var, "diff1_", "")))
+
+## create HPDI intervals
+x.stats <- dat.gg %>%
+  group_by(veg, var) %>%
+ 
+    summarize(lwr95 = hpdi(diff1, 0.95)[, "lower"],
+            lwr50 = hpdi(diff1, 0.5)[, "lower"],
+            mid = median(diff1),
+            upr50 = hpdi(diff1, 0.5)[, "upper"],
+            upr95 = hpdi(diff1, 0.95)[, "upper"])
+
+## DSF plot 1
+
+## Subset raw data for DSF plot
+DAT.plot.DSF <- DAT.plot %>%
+  filter(veg == "DSF")
+
+DSF.1.ro <- ggplot(subset(x.stats, veg %in% c("DSF")), aes(x = var))+
+ 
+   My_Theme +
+
+    geom_jitter(data = DAT.plot.DSF, aes(y = root_biomass, color = var), 
+            height = 0.2,
+            size = 0.6, alpha = 0.3, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr95, yend = upr95),
+               size = 0.6) +
+ 
+  geom_segment(aes(xend = var, y = lwr50, yend = upr50),
+               size = 6.0, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr50+0.03, yend = upr50-0.03, color = var),
+               size = 4.75, show.legend = FALSE) +
+  
+  scale_color_manual(values = cols) +
+ 
+  theme(axis.text.y = element_blank(), axis.text.x = element_text(size = 9, hjust=0), axis.title.y = element_text(size = 12), axis.title.x = element_text(size = 12)) +
+  
+  labs(x = NULL, y = NULL) +
+  
+  scale_x_discrete(labels=xtext) +
+  
+  annotate("text", x = 0.8, y = 2.75, label = "e", size = 4, fontface = 2) +
+  
+  scale_y_continuous(breaks = c(0, 1, 2, 3)) +
+  coord_cartesian(ylim=c(0, 3)) 
+
+
+## GWD plot 1
+
+## Subset raw data for DSF plot
+DAT.plot.GWD <- DAT.plot %>%
+  filter(veg == "GWD")
+
+GWD.1.ro <- ggplot(subset(x.stats, veg %in% c("GWD")), aes(x = var))+
+ 
+  My_Theme +
+
+  
+    geom_jitter(data = DAT.plot.GWD, aes(y = root_biomass, color = var), 
+            height = 0.2,
+            size = 0.6, alpha = 0.3, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr95, yend = upr95),
+               size = 0.6) +
+ 
+  geom_segment(aes(xend = var, y = lwr50, yend = upr50),
+               size = 6.0, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr50+0.03, yend = upr50-0.03, color = var),
+               size = 4.75, show.legend = FALSE) +
+  
+  scale_color_manual(values = cols) +
+ 
+  theme(axis.text.y = element_blank(), axis.text.x = element_text(size = 9, hjust=0), axis.title.y = element_text(size = 12), axis.title.x = element_text(size = 12)) +
+  
+  labs(x = NULL, y = NULL) +
+  
+  scale_x_discrete(labels=xtext) +
+  
+  annotate("text", x = 0.8, y = 2.75, label = "f", size = 4, fontface = 2) +
+  
+  scale_y_continuous(breaks = c(0, 1, 2, 3)) +
+  coord_cartesian(ylim=c(0, 3))  
+### WSF plot 1
+
+## Subset raw data for WSF plot
+DAT.plot.WSF <- DAT.plot %>%
+  filter(veg == "WSF")
+
+WSF.1.ro <- ggplot(subset(x.stats, veg %in% c("WSF")), aes(x = var))+
+ 
+  My_Theme +
+
+  
+    geom_jitter(data = DAT.plot.WSF, aes(y = root_biomass, color = var), 
+            height = 0.2,
+            size = 0.6, alpha = 0.3, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr95, yend = upr95),
+               size = 0.6) +
+ 
+  geom_segment(aes(xend = var, y = lwr50, yend = upr50),
+               size = 6.0, show.legend = FALSE) +
+  
+  geom_segment(aes(xend = var, y = lwr50+0.03, yend = upr50-0.03, color = var),
+               size = 4.75, show.legend = FALSE) +
+  
+  scale_color_manual(values = cols) +
+ 
+  theme(axis.text.x = element_text(size = 9, hjust=0), axis.title.y = element_text(size = 12), axis.title.x = element_text(size = 12)) +
+  
+  labs(x = "", y = "CRB (g)\n") +
+  
+  scale_x_discrete(labels=xtext) +
+  
+  annotate("text", x = 0.8, y = 2.75, label = "d", size = 4, fontface = 2) +
+  
+  
+  scale_y_continuous(breaks = c(0, 1, 2, 3)) +
+  coord_cartesian(ylim=c(0, 3)) 
+
+
+# test plot  
+GWD.1.ro
+
+```
+
+```{r}
+### how many points are above the plot window?
+points <- DAT.plot.DSF %>%
+  filter(root_biomass >= 3) %>%
+  group_by(var) %>%
+  count(var)
+
+knitr::kable(points, digits = 3)
+```
+
+```{r}
+### how many points are above the plot window?
+points <- DAT.plot.GWD %>%
+  filter(root_biomass >= 3) %>%
+  group_by(var) %>%
+  count(var)
+
+knitr::kable(points, digits = 3)
+```
+
+```{r}
+### how many points are above the plot window?
+points <- DAT.plot.WSF %>%
+  filter(root_biomass >= 3) %>%
+  group_by(var) %>%
+  count(var)
+
+knitr::kable(points, digits = 3)
+```
+
+Mean increase in total biomass:
+
+```{r}
+
+dat.gg %>%
+  group_by(veg, var) %>%
+  summarize(prob = mean(diff1))
+
+```
+
+Summary of magnitude of differences based on 50% and 95% highest posterior density intervals.
+
+The `hpdi` function is defined in the setup code chunk at the beginning of this document.
+
+```{r}
+
+x <- dat.gg %>%
+  group_by(veg, var) %>%
+  
+  summarize(lwr95 = hpdi(diff1, 0.95)[, "lower"],
+            lwr50 = hpdi(diff1, 0.5)[, "lower"],
+            mid = median(diff1),
+            upr50 = hpdi(diff1, 0.5)[, "upper"],
+            upr95 = hpdi(diff1, 0.95)[, "upper"])
+
+knitr::kable(x, digits = 2)
+
+```
+
+
+Here we create seperate plots for each forest type in the difference calculation
+
+```{r fig.height = 4, fig.width = 1.3}
+
+## colors for labels
+
+#rhg_cols2 <- c("grey45", "grey15")
+
+## plot theme
+
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.x = element_text(size = 12, face = "bold"),
+  axis.title.y = element_text(size = 12, face = "bold", hjust = 0.5),
+  panel.background = element_blank(),
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  plot.margin = unit(c(5.5, 2, 1, 2), "pt"),
+  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  axis.text.x = element_blank())
+
+
+## labels for plots
+
+xtext <- c(expression(aCO[2]), expression(eCO[2]))
+#xtext <- c("D", "W")
+
+
+# convert to long format for ggplot
+dat.gg <- dat.watering.co2.diffs2 %>%
+  tidyr::gather(var, diff2, -veg) %>%
+  mutate(var = factor(str_replace(var, "diff2_", "")))
+
+
+## create HPDI intervals  
+x.stats <- dat.gg %>%
+  group_by(veg, var) %>%
+ 
+    summarize(lwr95 = hpdi(diff2, 0.95)[, "lower"],
+            lwr50 = hpdi(diff2, 0.5)[, "lower"],
+            mid = median(diff2),
+            upr50 = hpdi(diff2, 0.5)[, "upper"],
+            upr95 = hpdi(diff2, 0.95)[, "upper"]) 
+
+# convert to long format for ggplot
+dat.gg3 <- dat.watering.co2.diffs3 %>%
+  tidyr::gather(var, diff3, -veg) %>%
+  mutate(var = factor(str_replace(var, "diff3_", "")))
+
+
+
+
+## create HPDI intervals  
+x.stats3 <- dat.gg3 %>%
+  group_by(veg, var) %>%
+ 
+    summarize(lwr95 = hpdi(diff3, 0.95)[, "lower"],
+            lwr50 = hpdi(diff3, 0.5)[, "lower"],
+            mid = median(diff3),
+            upr50 = hpdi(diff3, 0.5)[, "upper"],
+            upr95 = hpdi(diff3, 0.95)[, "upper"]) 
+
+
+### DSF plot 2
+
+DSF.2.ro <- ggplot(subset(x.stats, veg %in% c("DSF")), aes(x = var)) +
+  
+  My_Theme +
+
+  geom_linerange(aes(ymin = lwr95, ymax = upr95),
+               size = 0.5, position = position_dodge(width = 0.6)) +
+ 
+  geom_linerange(aes(ymin = lwr50, ymax = upr50, colour = var),
+               size = 5.0, show.legend = FALSE, position = position_dodge(width = 0.6), col = "limegreen") +
+ 
+  #scale_colour_manual(values = rhg_cols2) +
+ 
+ 
+  theme(axis.text.y = element_blank()) +
+  
+  labs(x = "", y = NULL) +
+
+  
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  
+  #scale_x_discrete(labels = xtext) +
+  
+      annotate("text", x = 0.6, y = 0.5, label = "e", size = 4, fontface = 2) +
+  
+  annotate("text", x = 1.3, y = -0.6, label = "-4.40 %", size = 3, fontface = 2) +
+  
+  scale_y_continuous(breaks = c(-0.8, -0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6), position = "left") +
+  coord_cartesian(ylim=c(-0.8, 0.6)) 
+### GWD plot 2
+
+GWD.2.ro <- ggplot(subset(x.stats, veg %in% c("GWD")), aes(x = var)) +
+  
+  My_Theme +
+
+  geom_linerange(aes(ymin = lwr95, ymax = upr95),
+               size = 0.5, position = position_dodge(width = 0.6)) +
+ 
+  geom_linerange(aes(ymin = lwr50, ymax = upr50, colour = var),
+               size = 5.0, show.legend = FALSE, position = position_dodge(width = 0.6), col = "sienna1") +
+ 
+  #scale_colour_manual(values = rhg_cols2) +
+ 
+ 
+  theme(axis.text.y = element_blank()) +
+  
+  labs(x = "", y = NULL) +
+  
+  #scale_x_discrete(labels = xtext) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  
+      annotate("text", x = 0.6, y = 0.5, label = "f", size = 4, fontface = 2) +
+  
+  annotate("text", x = 1.3, y = -0.6, label = "-7.09 %", size = 3, fontface = 2) +
+  
+  scale_y_continuous(breaks = c(-0.8, -0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6), position = "left") +
+  coord_cartesian(ylim=c(-0.8, 0.6)) 
+
+### WSF plot 2
+  
+WSF.2.ro <- ggplot(subset(x.stats, veg %in% c("WSF")), aes(x = var)) +
+  
+  My_Theme +
+
+  geom_linerange(aes(ymin = lwr95, ymax = upr95),
+               size = 0.5, position = position_dodge(width = 0.6)) +
+ 
+  geom_linerange(aes(ymin = lwr50, ymax = upr50, colour = var),
+               size = 5.0, show.legend = FALSE, position = position_dodge(width = 0.6), col = "royalblue1") +
+ 
+  #scale_colour_manual(values = rhg_cols2) +
+  
+  labs(x = "", y = "") +
+
+  theme(axis.text.y = element_text(size = 10), axis.title.y = element_text(size = 12)) +
+  
+  #scale_x_discrete(labels = xtext) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  
+      annotate("text", x = 0.6, y = 0.5, label = "d", size = 4, fontface = 2) +
+  
+   annotate("text", x = 1.3, y = -0.6, label = "-7.82 %", size = 3, fontface = 2) +
+  
+  
+  scale_y_continuous(breaks = c(-0.8, -0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6), position = "left") +
+  coord_cartesian(ylim=c(-0.8, 0.6)) 
+
+#test plot
+DSF.2.ro
+```
+
+Probability of an increase in total biomass relative to the reference level:
+
+```{r}
+
+dat.gg %>%
+  group_by(veg, var) %>%
+  summarize(prob = mean(diff2))
+
+```
+```{r}
+dat.gg3 %>%
+  group_by(veg, var) %>%
+  summarize(prob = mean(diff3))
+```
+
+Summary of magnitude of differences based on 50% and 95% highest posterior density intervals.
+
+The `hpdi` function is defined in the setup code chunk at the beginning of this document.
+
+```{r}
+
+x <- dat.gg %>%
+  group_by(veg, var) %>%
+  
+  summarize(lwr95 = hpdi(diff2, 0.95)[, "lower"],
+            lwr50 = hpdi(diff2, 0.5)[, "lower"],
+            mid = median(diff2),
+            upr50 = hpdi(diff2, 0.5)[, "upper"],
+            upr95 = hpdi(diff2, 0.95)[, "upper"])
+
+knitr::kable(x, digits = 2)
+
+```
+
+### combine plots
+
+
+```{r fig.height = 2.6, fig.width = 6}
+library(ggpubr)
+library(egg)
+
+
+
+fig <- egg::ggarrange(WSF.1.ro, DSF.1.ro, GWD.1.ro, ncol = 3, nrow = 1, widths = c(1, 1, 1)) 
+
+annotate_figure(fig, bottom = text_grob("Treatment", face = "bold", vjust = -2))
+
+```
+
+```{r fig.height = 2, fig.width = 3}
+library(ggpubr)
+library(egg)
+
+
+
+fig <- egg::ggarrange(WSF.2.ro, DSF.2.ro, GWD.2.ro, ncol = 3, nrow = 1, widths = c(1, 1, 1)) 
+
+annotate_figure(fig, bottom = text_grob("Treatment", face = "bold", vjust = -2))
+
+fig 
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Probability of an increase in total biomass relative to the reference level:
+
+```{r}
+
+dat.gg %>%
+  group_by(veg, var) %>%
+  summarize(prob = mean(diff2))
+
+```
+
+Summary of magnitude of differences based on 50% and 95% highest posterior density intervals.
+
+The `hpdi` function is defined in the setup code chunk at the beginning of this document.
+
+```{r}
+
+x <- dat.gg %>%
+  group_by(veg, var) %>%
+  
+  summarize(lwr95 = hpdi(diff2, 0.95)[, "lower"],
+            lwr50 = hpdi(diff2, 0.5)[, "lower"],
+            mid = median(diff2),
+            upr50 = hpdi(diff2, 0.5)[, "upper"],
+            upr95 = hpdi(diff2, 0.95)[, "upper"])
+
+knitr::kable(x, digits = 2)
+
+```

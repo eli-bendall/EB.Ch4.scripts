@@ -1,0 +1,209 @@
+---
+title: "water potential monitoring data"
+output:
+  word_document: default
+  pdf_document:
+    fig_height: 6
+    fig_width: 8
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(purrr)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(stringr)
+library(tidyr)
+
+library(rjags)
+load.module("glm")
+
+
+# Detect if we are running code chunks manually or knitting to an output document
+# so we can format graphs differently
+x <- knitr::current_input()
+KNITTING_DOC <- !(x == "" || is.null(x))
+
+# Set random number generator seed for reproducible results
+set.seed(42)
+
+
+# Default theme for graphs
+theme_set( theme_bw() )
+
+
+# Function to calculate highest posterior density intervals
+# (adapted from coda::HPDinterval). Returns a matrix with a 
+# row for each input variable.
+hpdi <- function (x, prob = 0.95) 
+{
+  x <- as.matrix(x)
+  Nr <- nrow(x)
+  if (Nr <= 1) stop("x must have more than 1 vector element or matrix row")
+  x <- apply(x, 2, sort)
+
+  Nc <- ncol(x)
+  gap <- max(1, min(Nr - 1, round(Nr * prob)))
+  init <- 1:(Nr - gap)
+  
+  inds <- apply(x[init + gap, , drop = FALSE] - x[init, , drop = FALSE], 
+                MARGIN = 2, 
+                which.min)
+  
+  out <- cbind(x[cbind(inds, 1:Nc)], x[cbind(inds + gap, 1:Nc)])
+  colnames(out) <- c("lower", "upper")
+  
+  rnms <- colnames(x)
+  if (is.null(rnms)) rnms <- paste0("X", 1:Nc)
+  rownames(out) <- rnms
+  
+  out
+}
+
+```
+
+
+## Import data
+
+```{r}
+
+DAT <- read_excel("monitoring data_25JUL20.xlsx")
+
+DAT <- DAT %>%
+  select(mpa,
+         veg,
+         co2,
+         species,
+         watering,
+         date) %>%
+  filter(!is.na(mpa))
+
+```
+
+```{r}
+colSums( is.na(DAT) )
+```
+
+```{r}
+DAT.stats <- DAT %>%
+  group_by(date, watering, co2, veg) %>%
+  
+  summarize(
+            mpa.med = median(mpa)) %>%
+  ungroup()
+```
+
+
+```{r fig.height = 6, fig.width = 6}
+
+My_Theme = theme(
+  plot.title = element_text(size = 11, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 11, face = "bold", hjust = 0.5, vjust = 5.75),
+  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  axis.text.x = element_text(size = 10, face = "bold", angle = 290, hjust = 0.2, vjust=0.6, margin = unit(c(0.2, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 11, face = "bold"),
+  strip.text.x = element_blank(),
+  #strip.text.y = element_(size = 12),
+  strip.text = element_text(face = "bold"),
+  strip.background = element_blank(),
+  legend.position = "bottom",
+  panel.background = element_blank(),
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  plot.margin = unit(c(5.5, 8, 8, 15), "pt"))
+
+fig <- ggplot(data = DAT.stats, aes(x = date)) +
+  
+  geom_line(aes(y = mpa.med, color = veg),
+             size = 1.5, alpha = 0.8) +
+  
+  My_Theme +
+  
+  
+    #scale_shape_manual("State", values = c(1, 2), aesthetics = c("fill")) +
+  
+  scale_color_brewer(palette = "Dark2") +
+  
+  #geom_hline(yintercept = 5000, linetype = "dotted")+
+  
+  facet_wrap(watering ~ co2)+
+  
+  coord_cartesian(ylim = c(-5, 0)) +
+  
+  
+  labs(x = "Date", y = "Water potential (MPa)")
+       #title = "Stand density",
+       #subtitle = "Black points and lines are medians and inter-quartile range")
+
+#ggsave("monitoring data.png")
+
+```
+
+```{r fig.height = 4.25, fig.width = 5}
+library(ggpubr)
+library(egg)
+fig <- egg::ggarrange(fig,  ncol = 1, nrow = 1) 
+
+fig2 <- annotate_figure(fig, top = text_grob("400ppm                               640ppm", face = "bold", hjust = 0.42), right = text_grob("drought          well-watered", face = "bold", rot = 270, hjust = 0.75))
+
+ggsave("monitoring.png")
+
+fig2
+```
+
+
+
+
+
+```{r}
+
+library(RColorBrewer)
+myColors <- brewer.pal(2,"Set1")
+names(myColors) <- levels(DAT$co2)
+colScale <- scale_colour_manual(name = "co2",values = myColors)
+
+My_Theme = theme(
+  axis.title.x = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.title.y = element_text(size = 16))
+
+
+
+
+ggplot(data = DAT, aes(x = date)) +
+  
+  My_Theme +
+  
+  geom_linerange(aes(y = mpa, colour = watering),
+             position = position_jitterdodge(jitter.width = 0.4),
+             size = 2, alpha = 0.4) +
+  
+  geom_linerange(data = cell.stats, 
+              #  aes(ymin = q25, ymax = q75, group = co2),
+               # position = position_dodge(width = 0.8),
+               # width = 0.4) +
+  
+  #geom_point(data = cell.stats, 
+    #         aes(y = mean, group = co2),
+       #      position = position_dodge(width = 0.8)) +
+  #
+  labs(x = "Forest type", y = "mPA (g)",
+       title = "Coarse root biomass",
+       subtitle = "Black points and lines are means and inter-quartile range") +
+  
+  colScale +
+  
+  
+  facet_wrap(co2 ~ veg)
+
+```
+

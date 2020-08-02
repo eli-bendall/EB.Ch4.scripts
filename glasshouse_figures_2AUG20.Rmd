@@ -1,0 +1,112 @@
+---
+title: "Cell means models_figures"
+output:
+  word_document: default
+  pdf_document:
+    fig_height: 6
+    fig_width: 8
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+#### IMPORTANT NOTE: If you wish to have the combined figure at the end of this doc (e.g. total biomass, above ground biomass and below ground biomass) then you have to run each sequentially. Until I figure out how to save and load ggplot images easily....
+
+
+```{r fig.height = 4.25, fig.width = 5}
+library(ggpubr)
+library(egg)
+fig <- egg::ggarrange(WSF.1.lg, DSF.1.lg, GWD.1.lg, WSF.1.ro, DSF.1.ro, GWD.1.ro,  ncol = 3, nrow = 2, widths = c(1, 1, 1)) 
+
+combined_storage_plot <- annotate_figure(fig, bottom = text_grob("Treatment", face = "bold", vjust = -1.5, hjust = 0.25))
+
+ggsave("combined_storage_plot.png")
+
+combined_storage_plot
+```
+
+```{r fig.height = 3, fig.width = 4}
+library(ggpubr)
+library(egg)
+fig <- egg::ggarrange(WSF.2.lg, DSF.2.lg, GWD.2.lg, WSF.2.ro, DSF.2.ro, GWD.2.ro,  ncol = 3, nrow = 2, widths = c(1, 1, 1)) 
+
+combined_storage_plot_diffs <- annotate_figure(fig, bottom = text_grob("", face = "bold", vjust = -1.5, hjust = 0.2), left = text_grob("\u0394 biomass (g)", face = "bold", rot = 90, hjust = 0.48, vjust = 0.9), right = text_grob("LB                   CRB", face = "bold", rot = 270, hjust = 0.5))
+
+ggsave("combined_storage_plot_diffs.png")
+
+combined_storage_plot_diffs
+```
+
+
+```{r fig.height = 4.25, fig.width = 5}
+library(ggpubr)
+library(egg)
+fig <- egg::ggarrange(WSF.1.lma, DSF.1.lma, GWD.1.lma, WSF.1.rs, DSF.1.rs, GWD.1.rs,  ncol = 3, nrow = 2, widths = c(1, 1, 1)) 
+
+combined_lma_plot <- annotate_figure(fig, bottom = text_grob("Treatment", face = "bold", vjust = -1.5, hjust = 0.25))
+
+ggsave("combined_lma_plot.png")
+
+combined_lma_plot
+```
+
+```{r fig.height = 3.25, fig.width = 4}
+library(ggpubr)
+library(egg)
+fig <- egg::ggarrange(WSF.2.lma, DSF.2.lma, GWD.2.lma, WSF.2.rs, DSF.2.rs, GWD.2.rs,  ncol = 3, nrow = 2, widths = c(1, 1, 1)) 
+
+combined_lma_plot_diffs <- annotate_figure(fig, bottom = text_grob("", face = "bold", vjust = -1.5, hjust = 0.25), right = text_grob("", face = "bold", rot = 270, hjust = 0.665))
+
+ggsave("combined_lma_plot_diffs.png")
+
+combined_lma_plot_diffs
+```
+
+
+```{r fig.height = 3, fig.width = 4}
+library(ggpubr)
+library(egg)
+fig <- egg::ggarrange(WSF.2.ph, DSF.2.ph, GWD.2.ph, WSF.2.c, DSF.2.c, GWD.2.c,  ncol = 3, nrow = 2, widths = c(1, 1, 1)) 
+
+combined_dimensions_plot_diffs <- annotate_figure(fig, bottom = text_grob("", face = "bold", vjust = -1.5, hjust = 0.2), right = text_grob("Height             Crown", face = "bold", rot = 270, hjust = 0.55))
+
+ggsave("combined_dimensions_plot_diffs.png")
+
+combined_dimensions_plot_diffs
+```
+
+```{r fig.height = 4.25, fig.width = 5}
+library(ggpubr)
+library(egg)
+fig <- egg::ggarrange(WSF.1.ph, DSF.1.ph, GWD.1.ph, WSF.1.c, DSF.1.c, GWD.1.c,  ncol = 3, nrow = 2, widths = c(1, 1, 1)) 
+
+combined_dimensions_plot <- annotate_figure(fig, bottom = text_grob("Treatment", face = "bold", vjust = -1.5, hjust = 0.25))
+
+ggsave("combined_dimensions_plot.png")
+
+combined_dimensions_plot
+```
+
+```{r fig.height = 4, fig.width = 4}
+library(ggpubr)
+library(egg)
+fig <- egg::ggarrange(WSF.2.tot, DSF.2.tot, GWD.2.tot, WSF.2.sh, DSF.2.sh, GWD.2.sh, WSF.2.bg, DSF.2.bg, GWD.2.bg,  ncol = 3, nrow = 3, widths = c(1, 1, 1)) 
+
+combined_biomass_plot_diffs <- annotate_figure(fig, bottom = text_grob("", face = "bold", vjust = -1.5, hjust = 0.25), right = text_grob("TB                 AGB               BGB", face = "bold", rot = 270, hjust = 0.52), left = text_grob("\u0394 biomass (g)", face = "bold", rot = 90, hjust = 0.48, vjust = 0.9))
+
+ggsave("combined_biomass_plot_diffs.png")
+
+combined_biomass_plot_diffs
+```
+
+```{r fig.height = 6, fig.width = 5}
+library(ggpubr)
+library(egg)
+fig <- egg::ggarrange(WSF.1.tot, DSF.1.tot, GWD.1.tot, WSF.1.sh, DSF.1.sh, GWD.1.sh, WSF.1.bg, DSF.1.bg, GWD.1.bg,  ncol = 3, nrow = 3, widths = c(1, 1, 1)) 
+
+combined_biomass_plot <- annotate_figure(fig, bottom = text_grob("Treatment", face = "bold", vjust = -1.5, hjust = 0.25))
+
+ggsave("combined_biomass_plot.png")
+
+combined_biomass_plot
+```
