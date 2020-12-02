@@ -72,7 +72,7 @@ hpdi <- function (x, prob = 0.95)
 
 ```{r}
 
-DAT <- read_excel("AG_BIOMASS_FINAL_OCT.xlsx") %>%
+DAT <- read_excel("BIOMASS_DATA_2AUG20.xlsx") %>%
   mutate_if(is.character, as.factor) %>%
   rename(watering = drought)
   
