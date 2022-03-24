@@ -1,0 +1,354 @@
+---
+title: "Biomass model - displaying species-level trends"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr, warn.conflicts = FALSE)
+library(ggplot2)
+library(readxl)
+library(stringr)
+library(tidyr)
+
+
+# Use runjags because it is a little easier to run parallel MCMC chains
+# than using rjags directly.
+library(runjags)
+
+runjags.options(modules = "glm", method = "parallel")
+
+# Default graph theme
+theme_set( theme_bw() )
+
+
+# Function to calculate highest posterior density intervals
+# (adapted from coda::HPDinterval). Returns a matrix with a 
+# row for each input variable.
+hpdi <- function (x, prob = 0.95) 
+{
+  x <- as.matrix(x)
+  Nr <- nrow(x)
+  if (Nr <= 1) stop("x must have more than 1 vector element or matrix row")
+  x <- apply(x, 2, sort)
+
+  Nc <- ncol(x)
+  gap <- max(1, min(Nr - 1, round(Nr * prob)))
+  init <- 1:(Nr - gap)
+  
+  inds <- apply(x[init + gap, , drop = FALSE] - x[init, , drop = FALSE], 
+                MARGIN = 2, 
+                which.min)
+  
+  out <- cbind(x[cbind(inds, 1:Nc)], x[cbind(inds + gap, 1:Nc)])
+  colnames(out) <- c("lower", "upper")
+  
+  rnms <- colnames(x)
+  if (is.null(rnms)) rnms <- paste0("X", 1:Nc)
+  rownames(out) <- rnms
+  
+  out
+}
+
+```
+
+
+## Summary
+
+This is a modification of the total biomass model (see document `TB2AUG20.Rmd`) to fit and display species-level effects within each cell (veg x watering x CO2 combination).
+
+*Caution!* This is essentially just for graphical exploration of the previously fitted, veg-level model. It is not a fully hierarchical model because there is no information sharing between species and veg type levels.
+
+
+## Data
+
+```{r}
+
+DAT <- read_excel("BIOMASS_DATA_2AUG20.xlsx") %>%
+  mutate_if(is.character, as.factor) %>%
+  rename(watering = drought) %>%
+  
+  # subset data to records without missing biomass values
+  dplyr::filter(!is.na(total_biomass)) %>%
+  dplyr::filter(bg_total > 0) %>%
+  
+  dplyr::select(veg, co2, watering, species, total_biomass) %>%
+  
+  # Assign cell indices and labels
+  group_by(veg, watering, co2) %>%
+  
+  mutate(cell = cur_group_id(),
+         cell_label = paste0(
+           ifelse(co2 == "400ppm", "400", "640"),
+           ifelse(watering == "drought", "Dr", "Wtr"),
+           veg
+         )) %>%
+  
+  ungroup() %>%
+
+  # Assign index (1-3) for species within veg type. This 
+  # can be used as species within treatment cell.
+  group_by(veg) %>%
+  mutate(sp_in_cell = as.integer(factor(species))) %>%
+  ungroup() %>%
+  
+  # Assign extended labels to species to make graphs easier to read
+  mutate(species_veg = sprintf("%s: %s", veg, species),
+         species_veg = factor(species_veg))
+
+head(DAT)
+
+```
+
+
+Quick graph of the data:
+
+```{r}
+
+ggplot(data = DAT) +
+  geom_point(aes(x = total_biomass, y = cell_label, colour = species_veg),
+             position = position_dodge(width = 0.6),
+             size = 2) +
+  
+  scale_colour_brewer(name = "Species", palette = "Set1") +
+  
+  labs(x = "Total biomass (g)", y = "")
+
+```
+
+## Model
+
+### JAGS model code
+
+Note that we provide two identical vectors for the response variable (total biomass) to the model, denoted as `y` and `ycopy`. This is to avoid JAGS complaining that a single response variable is being modelled in two, unconnected ways.
+
+```{r}
+
+modelTxt <- "model {
+  # Cell means
+  for (i in 1:length(y)) {
+    # Responses modelled as Gamma distributed values
+    y[i] ~ dgamma(shape[i], rate[i])
+    
+    # Relate parameters of Gamma distribution to
+    # cell means and variances
+    shape[i] <- mu[cell[i]]^2 / sd[cell[i]]^2
+    rate[i] <- mu[cell[i]] / sd[cell[i]]^2
+  }
+  
+  # Species-within-cell means
+  # Note: there is no connection to the cell means (veg-level) model above.
+  for (i in 1:length(ycopy)) {
+    # Responses modelled as Gamma distributed values
+    ycopy[i] ~ dgamma(shape.sp[i], rate.sp[i])
+    
+    # Relate parameters of Gamma distribution to
+    # cell means and variances
+    shape.sp[i] <- mu.sp[cell[i], sp_in_cell[i]]^2 / sd.sp[cell[i], sp_in_cell[i]]^2
+    rate.sp[i] <- mu.sp[cell[i], sp_in_cell[i]] / sd.sp[cell[i], sp_in_cell[i]]^2
+  }
+  
+  # Priors for cell means and standard deviations at the
+  # veg type level
+  for (k in 1:max(cell)) {
+    # Prior means are constrained to be positive
+    mu[k] ~ dnorm(0, 1e-3)I(0, )
+    sd[k] ~ dunif(1, 30)
+  }
+  
+  # Priors for cell means and standard deviations at the
+  # species-within-veg type level
+  for (k in 1:max(cell)) {
+    for (isp in 1:3) {
+      # Prior means are constrained to be positive
+      mu.sp[k, isp] ~ dnorm(0, 1e-3)I(0, )
+      sd.sp[k, isp] ~ dunif(1, 30)
+    }
+  }
+  
+}"
+
+```
+
+
+### Prepare data and run model
+
+Add an integer index for species-within-cell.
+
+```{r}
+
+dat.model <- DAT %>%
+  # Note: creating two copies of the response data
+  dplyr::select(y = total_biomass,
+                ycopy = total_biomass,
+                cell, sp_in_cell) %>%
+  
+  arrange(cell, sp_in_cell) 
+  
+
+```
+
+
+```{r}
+
+model <- run.jags(modelTxt, 
+                  data = dat.model, 
+                  monitor = c("mu", "mu.sp"), 
+                  n.chains = 4, 
+                  adapt = 1000, 
+                  burnin = 4000, 
+                  sample = 2000,
+                  thin = 10)
+
+```
+
+Quick check of model convergence by examining the number of effectively independent samples for each model parameter. Because there are not many parameters we can just use the run.jags::summary function for this.
+
+```{r}
+
+s <- summary(model)
+summary( s[, "SSeff"] )
+
+```
+
+### Model results
+
+Calculate the 95% highest posterior density interval for each of the `mu` (cell mean) and `mu.sp` (species-within-cell mean) parameters.
+
+```{r}
+
+# Combine model chains into a single matrix
+post <- do.call(rbind, model$mcmc)
+
+# 50% posterior intervals
+post.50 <- hpdi(post, prob = 0.5) %>%
+  as.data.frame() %>%
+  mutate(param = rownames(.)) %>%
+  rename(lower50 = lower, upper50 = upper)
+
+rownames(post.50) <- NULL
+
+# 95% posterior intervals
+post.95 <- hpdi(post, prob = 0.95) %>%
+  as.data.frame() %>%
+  mutate(param = rownames(.)) %>%
+  rename(lower95 = lower, upper95 = upper)
+
+rownames(post.95) <- NULL
+
+post.intervals <- left_join(post.50, post.95, by = "param") %>%
+  dplyr::select(param, lower95, lower50, upper50, upper95)
+  
+```
+
+```{r}
+DAT <- DAT %>%
+  tidyr::unite(watering_co2, watering, co2) 
+```
+
+```{r}
+DAT1 <- DAT %>%
+  mutate(species_veg = factor(species_veg, levels = c("DSF: C. gummifera", "DSF: E. pilularis", "DSF: E. sieberi", "GWD: E. blakelyi", "GWD: E. bridgesiana", "GWD: E. melliodora", "WSF: C. maculata", "WSF: E. fastigata", "WSF: E. viminalis"),
+                              labels = c("DSF: C. gummifera", "         E. pilularis", "         E. sieberi", "GW: E. blakelyi", "         E. bridgesiana", "         E. melliodora", "WSF: C. maculata", "          E. fastigata", "          E. viminalis")))
+```
+
+
+Graph the intervals for cell and species-within-cell means against the observed data.
+
+```{r fig.height = 2.25, fig.width = 4}
+
+#xtext <- c(expression("D" ~ aCO^{2}), expression("D" ~ eCO^{2}), expression("W" ~ aCO^{2}), expression("W" ~ eCO^{2}))
+
+cell_labels <- DAT1 %>%
+  distinct(cell, cell_label)
+
+cell_species_labels <- DAT1 %>%
+  distinct(cell, cell_label, sp_in_cell, species_veg) %>%
+  arrange(cell, sp_in_cell)
+
+dat.gg.cell <- post.intervals %>%
+  dplyr::filter(str_detect(param, "^mu\\[")) %>%
+  mutate(cell = as.integer( str_extract(param, "\\d+") )) %>%
+  left_join(cell_labels)
+
+dat.gg.species <- post.intervals %>%
+  dplyr::filter(str_detect(param, "^mu.sp")) %>%
+  mutate(indices = str_extract(param, "\\d+,\\d+")) %>%
+  tidyr::separate(indices, into = c("cell", "sp_in_cell"), convert = TRUE) %>%
+  left_join(cell_species_labels)
+
+
+
+My_Theme = theme(
+  plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 14, face = "bold", hjust = 0.5, vjust = 2.5),
+  axis.text.y = element_text(size = 14, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  axis.text.x = element_text(size = 14, angle = 60, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm"), hjust = 1),
+  axis.title.x = element_text(size = 14, face = "bold"),
+  strip.text.x = element_text(size = 14),
+  strip.text.y = element_text(size = 14),
+  strip.text = element_text(face = "bold"),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.125, 0.75),
+  legend.text.align = 0,
+  legend.spacing.x =  unit(0.01, 'cm'),
+  legend.text = element_text(size = 8, hjust = 0.5, face = 'italic'),
+  plot.margin = unit(c(5, 5, 5, 5), "pt"))
+
+ytext <- c(expression("DSF: D+" ~ aCO[2]), expression("GWD: D+" ~ aCO[2]), expression("WSF: D+" ~ aCO[2]), expression("DSF: W+" ~ aCO[2]), expression("GWD: W+" ~ aCO[2]), expression("WSF: W+" ~ aCO[2]), expression("DSF: D+" ~ eCO[2]), expression("GWD: D+" ~ eCO[2]), expression("WSF: D+" ~ eCO[2]), expression("DSF: W+" ~ eCO[2]), expression("GWD: W+" ~ eCO[2]), expression("WSF: W+" ~ eCO[2]))
+
+colours <- c("springgreen4", "springgreen3", "seagreen2", "firebrick4", "orangered2", "darksalmon", "blue4", "royalblue3", "steelblue1")
+
+dodgew <- 0.2
+
+ggTB <- ggplot(data = DAT1, aes(y = cell_label)) +
+  geom_point(aes(x = total_biomass, colour = species_veg),
+             position = position_dodge(width = dodgew),
+             size = 3, shape = 1, alpha = 0.6) +
+  
+  My_Theme +
+  
+  # Species level intervals
+  geom_linerange(data = dat.gg.species,
+                 aes(xmin = lower50, xmax = upper50, colour = species_veg),
+                 position = position_dodge(width = dodgew),
+                 size = 2, alpha = 0.75) +
+  
+  geom_linerange(data = dat.gg.species,
+                 aes(xmin = lower95, xmax = upper95, colour = species_veg),
+                 position = position_dodge(width = dodgew),
+                 size = 1, alpha = 0.5) +
+  
+  # Cell level intervals
+  geom_linerange(data = dat.gg.cell,
+                 aes(xmin = lower50, xmax = upper50),
+                 size = 3.5, alpha = 1) +
+  
+  geom_linerange(data = dat.gg.cell,
+                 aes(xmin = lower95, xmax = upper95),
+                 size = 1.5, alpha = 0.75) +
+  
+  scale_y_discrete(labels=ytext) +
+  
+  scale_colour_manual(values = colours) +
+  
+  labs(x = "Total biomass (g)", y = "Treatment combination", colour = "Species") + 
+  
+  coord_flip()
+
+
+ggsave(filename = "total_biomass_cell_species.png")
+
+print(ggTB)
+
+```
+
+
