@@ -397,13 +397,15 @@ dat.gg <- dat %>%
   mutate(ispecies = factor(as.integer(factor(species)))) %>%
   ungroup()
 
-ggplot(data = dat.gg) +
+LMA.species <- ggplot(data = dat.gg) +
   geom_jitter(aes(x = ispecies, y = resid),
               width = 0.15, height = 0) +
   
   geom_hline(yintercept = 0, linetype = "dashed") +
   
   facet_grid(veg ~ watering + co2)
+
+LMA.species
 
 ```
 
@@ -609,13 +611,13 @@ cols <- c("drought_400ppm" = "#d95f02", "drought_640ppm" = "#1b9e77", "well_wate
 ## Plot theme
 
 My_Theme = theme(
-  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
-  axis.title.y = element_text(size = 12, face = "bold", hjust = 0.5, vjust = 5.75),
-  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 14, face = "bold", hjust = 0.5, vjust = 5.75),
+  axis.text.y = element_text(size = 14, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
   axis.text.x = element_blank(),
-  axis.title.x = element_text(size = 12, face = "bold"),
-  strip.text.x = element_text(size = 12),
-  strip.text.y = element_text(size = 12),
+  axis.title.x = element_text(size = 14, face = "bold"),
+  strip.text.x = element_text(size = 14),
+  strip.text.y = element_text(size = 14),
   strip.text = element_text(face = "bold"),
   strip.background = element_blank(),
   panel.background = element_blank(),
@@ -672,16 +674,17 @@ DSF.1.lma <- ggplot(subset(x.stats, veg %in% c("DSF")), aes(x = var))+
  
   scale_color_manual(values = cols) +
  
-  theme(axis.text.y = element_blank(), axis.title.y = element_text(size = 12), axis.title.x = element_text(size = 12)) +
+  theme(axis.text.y = element_blank(), axis.title.y = element_text(size = 14), axis.title.x = element_text(size = 14)) +
   
   labs(x = NULL, y = NULL, title = "DSF") +
   
   scale_x_discrete(labels=xtext) +
   
-  annotate("text", x = 0.8, y = 11.5, label = "b", size = 4, fontface = 2) +
+  annotate("text", x = 0.8, y = 17.5, label = "(b)", size = 5, fontface = 2) +
   
-  scale_y_continuous(breaks = c(6, 7, 8, 9, 10, 11, 12)) +
-  coord_cartesian(ylim=c(6, 12)) 
+ scale_y_sqrt(breaks = c(6, 8, 10, 12, 14, 16, 18)) +
+  coord_cartesian(ylim=c(6, 18)) 
+
 
 
 ## GWD plot 1
@@ -710,16 +713,16 @@ GWD.1.lma <- ggplot(subset(x.stats, veg %in% c("GWD")), aes(x = var))+
  
   scale_color_manual(values = cols) +
  
-  theme(axis.text.y = element_blank(), axis.title.y = element_text(size = 12), axis.title.x = element_text(size = 12)) +
+  theme(axis.text.y = element_blank(), axis.title.y = element_text(size = 14), axis.title.x = element_text(size = 14)) +
   
   labs(x = NULL, y = NULL, title = "GW") +
   
   scale_x_discrete(labels=xtext) +
   
-  annotate("text", x = 0.8, y = 11.5, label = "c", size = 4, fontface = 2) +
+  annotate("text", x = 0.8, y = 17.5, label = "(c)", size = 5, fontface = 2) +
   
-  scale_y_continuous(breaks = c(6, 7, 8, 9, 10, 11, 12)) +
-  coord_cartesian(ylim=c(6, 12)) 
+ scale_y_sqrt(breaks = c(6, 8, 10, 12, 14, 16, 18)) +
+  coord_cartesian(ylim=c(6, 18)) 
 
 ### WSF plot 1
 
@@ -747,18 +750,17 @@ WSF.1.lma <- ggplot(subset(x.stats, veg %in% c("WSF")), aes(x = var))+
  
   scale_color_manual(values = cols) +
  
-  theme(axis.text.y = element_text(size = 10), axis.title.y = element_text(size = 12), axis.title.x = element_text(size = 12)) +
+  theme(axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 14), axis.title.x = element_text(size = 14)) +
   
   labs(x = NULL, y = expression(bold("LMA"~(mg/cm^{2})~"\n\n\n")), title = "WSF") +
   
   scale_x_discrete(labels=xtext) +
   
-  annotate("text", x = 0.8, y = 11.5, label = "a", size = 4, fontface = 2) +
+  annotate("text", x = 0.8, y = 17.5, label = "(a)", size = 5, fontface = 2) +
   
-  scale_y_continuous(breaks = c(6, 7, 8, 9, 10, 11, 12)) +
-  
- # scale_y_continuous(breaks = c(4, 6, 8, 10, 12, 14)) +
-  coord_cartesian(ylim=c(6, 12)) 
+ scale_y_sqrt(breaks = c(6, 8, 10, 12, 14, 16, 18)) +
+  coord_cartesian(ylim=c(6, 18)) 
+
 
  
 ### test plot
@@ -837,13 +839,13 @@ Here we create seperate plots for each forest type in the difference calculation
 ## plot theme
 
 My_Theme = theme(
-  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
-  axis.title.y = element_text(size = 12, face = "bold", hjust = 0.5),
-  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 14, face = "bold", hjust = 0.5),
+  axis.text.y = element_text(size = 14, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
   axis.text.x = element_blank(),
-  axis.title.x = element_text(size = 12, face = "bold"),
-  strip.text.x = element_text(size = 12),
-  strip.text.y = element_text(size = 12),
+  axis.title.x = element_text(size = 14, face = "bold"),
+  strip.text.x = element_text(size = 14),
+  strip.text.y = element_text(size = 14),
   strip.text = element_text(face = "bold"),
   strip.background = element_blank(),
   panel.background = element_blank(),
@@ -916,7 +918,7 @@ DSF.2.lma <- ggplot(subset(x.stats, veg %in% c("DSF")), aes(x = var)) +
  # scale_colour_manual(values = rhg_cols2) +
  
  
-    theme(axis.text.y = element_blank(), axis.title.y = element_text(size = 12)) +
+    theme(axis.text.y = element_blank(), axis.title.y = element_text(size = 14)) +
   
   
   labs(x = NULL, y = NULL, title = "DSF") +
@@ -926,9 +928,9 @@ DSF.2.lma <- ggplot(subset(x.stats, veg %in% c("DSF")), aes(x = var)) +
   
   scale_x_discrete(labels = xtext) +
   
-  annotate("text", x = 0.6, y = 1.25, label = "b", size = 4, fontface = 2) +
+  annotate("text", x = 0.525, y = 1.4, label = "(b)", size = 5, fontface = 2) +
   
-  annotate("text", x = 1.3, y = -2.25, label = "-9.79 %", size = 3, fontface = 2) +
+  annotate("text", x = 1.3, y = -2.25, label = "-9.79 %", size = 4, fontface = 2) +
   
   
   
@@ -951,7 +953,7 @@ GWD.2.lma <- ggplot(subset(x.stats, veg %in% c("GWD")), aes(x = var)) +
   #scale_colour_manual(values = rhg_cols2) +
  
  
-    theme(axis.text.y = element_blank(), axis.title.y = element_text(size = 12)) +
+    theme(axis.text.y = element_blank(), axis.title.y = element_text(size = 14)) +
   
   
   labs(x = NULL, y = NULL, title = "GW") +
@@ -960,9 +962,9 @@ GWD.2.lma <- ggplot(subset(x.stats, veg %in% c("GWD")), aes(x = var)) +
   
   geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
   
-  annotate("text", x = 0.6, y = 1.25, label = "c", size = 4, fontface = 2) +
+  annotate("text", x = 0.525, y = 1.4, label = "(c)", size = 5, fontface = 2) +
   
-  annotate("text", x = 1.3, y = -2.25, label = "-8.80 %", size = 3, fontface = 2) +
+  annotate("text", x = 1.3, y = -2.25, label = "-8.80 %", size = 4, fontface = 2) +
   
   
   scale_y_continuous(breaks = c(-2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5), position = "left") +
@@ -989,13 +991,13 @@ WSF.2.lma <- ggplot(subset(x.stats, veg %in% c("WSF")), aes(x = var)) +
   
   scale_x_discrete(labels = xtext) +
   
-    theme(axis.text.y = element_text(size = 10), axis.title.y = element_text(size = 12, vjust = 4)) +
+    theme(axis.text.y = element_text(size = 14), axis.title.y = element_text(size = 14, vjust = 3)) +
   
   geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
   
-  annotate("text", x = 0.6, y = 1.25, label = "a", size = 4, fontface = 2) +
+  annotate("text", x = 0.525, y = 1.4, label = "(a)", size = 5, fontface = 2) +
   
-  annotate("text", x = 1.3, y = -2.25, label = "-8.61 %", size = 3, fontface = 2) +
+  annotate("text", x = 1.3, y = -2.25, label = "-8.61 %", size = 4, fontface = 2) +
   
   scale_y_continuous(breaks = c(-2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5), position = "left") +
   coord_cartesian(ylim=c(-2.5, 1.5)) 
